@@ -175,13 +175,12 @@ def format_contact_for_gpt(contact: dict) -> dict:
 @app.route("/gong/calls/search", methods=["POST"])
 def search_gong_calls():
     """
-    Search Gong calls by date range, participants, or topics
+    Search Gong calls by date range
     
     Request body:
     {
         "from_date": "2024-01-01",  // Optional, defaults to 7 days ago
         "to_date": "2024-01-31",    // Optional, defaults to today
-        "participant_email": "john@example.com",  // Optional
         "limit": 20  // Optional, defaults to 20
     }
     """
@@ -191,26 +190,13 @@ def search_gong_calls():
     to_date = data.get("to_date") or datetime.now().strftime("%Y-%m-%d")
     from_date = data.get("from_date") or (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     
-    payload = {
-        "filter": {
-            "fromDateTime": f"{from_date}T00:00:00Z",
-            "toDateTime": f"{to_date}T23:59:59Z"
-        },
-        "contentSelector": {
-            "exposedFields": {
-                "content": True,
-                "structure": True,
-                "parties": True,
-                "interaction": True
-            }
-        }
+    # Use query parameters for GET request
+    params = {
+        "fromDateTime": f"{from_date}T00:00:00Z",
+        "toDateTime": f"{to_date}T23:59:59Z"
     }
     
-    # Add participant filter if provided
-    if data.get("participant_email"):
-        payload["filter"]["callParticipants"] = [data["participant_email"]]
-    
-    result = gong_request("POST", "/v2/calls", payload)
+    result = gong_request("GET", "/v2/calls", params=params)
     
     if not result or "calls" not in result:
         return jsonify({"message": "No calls found", "results": []})
@@ -224,16 +210,9 @@ def search_gong_calls():
             "started": call.get("started"),
             "duration_seconds": call.get("duration"),
             "url": call.get("url"),
-            "participants": [
-                {
-                    "name": p.get("name"),
-                    "email": p.get("emailAddress"),
-                    "user_id": p.get("userId")
-                }
-                for p in call.get("parties", [])
-            ],
-            "direction": call.get("direction"),  # Inbound/Outbound
-            "system": call.get("system"),  # Zoom, Teams, etc.
+            "participants": [p.get("emailAddress") for p in call.get("parties", [])],
+            "direction": call.get("direction"),
+            "system": call.get("system")
         })
     
     return jsonify({
@@ -272,82 +251,64 @@ def get_call_transcript(call_id: str):
 @app.route("/gong/calls/<call_id>/stats", methods=["GET"])
 def get_call_stats(call_id: str):
     """Get call statistics including talk ratio and trackers"""
-    result = gong_request("GET", f"/v2/calls/{call_id}")
+    # First get basic call info
+    params = {
+        "fromDateTime": (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%dT00:00:00Z"),
+        "toDateTime": datetime.now().strftime("%Y-%m-%dT23:59:59Z")
+    }
     
-    if not result:
+    result = gong_request("GET", "/v2/calls", params=params)
+    
+    if not result or "calls" not in result:
         return jsonify({"error": "Call not found"}), 404
     
-    call_data = result.get("calls", [{}])[0]
+    # Find the specific call
+    call_data = None
+    for call in result.get("calls", []):
+        if call.get("id") == call_id:
+            call_data = call
+            break
     
-    # Extract tracker mentions
-    trackers = call_data.get("trackers", [])
-    competitors = []
-    pain_points = []
-    objections = []
-    buying_signals = []
-    
-    for tracker in trackers:
-        tracker_name = tracker.get("name", "")
-        tracker_type = tracker.get("type", "").lower()
-        
-        if "competitor" in tracker_type:
-            competitors.append(tracker_name)
-        elif "pain" in tracker_type:
-            pain_points.append(tracker_name)
-        elif "objection" in tracker_type:
-            objections.append(tracker_name)
-        elif "buying" in tracker_type or "signal" in tracker_type:
-            buying_signals.append(tracker_name)
-    
-    # Get talk ratio
-    interaction_stats = call_data.get("interaction", {})
+    if not call_data:
+        return jsonify({"error": "Call not found"}), 404
     
     return jsonify({
         "call_id": call_id,
         "title": call_data.get("title"),
         "url": call_data.get("url"),
         "duration_seconds": call_data.get("duration"),
-        "talk_ratio": {
-            "rep_talk_percentage": interaction_stats.get("speakerTalkRatio", {}).get("rep", 0),
-            "prospect_talk_percentage": interaction_stats.get("speakerTalkRatio", {}).get("prospect", 0)
-        },
-        "trackers": {
-            "competitors": competitors,
-            "pain_points": pain_points,
-            "objections": objections,
-            "buying_signals": buying_signals
-        },
-        "outcome": call_data.get("outcome"),
-        "sentiment": call_data.get("sentiment")
+        "started": call_data.get("started"),
+        "direction": call_data.get("direction"),
+        "participants": [p.get("emailAddress") for p in call_data.get("parties", [])]
     })
 
 
 @app.route("/gong/contacts/<email>/calls", methods=["GET"])
 def get_contact_calls(email: str):
     """Get all Gong calls for a specific contact email"""
-    # Search calls where this email is a participant
-    payload = {
-        "filter": {
-            "fromDateTime": (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%dT00:00:00Z"),
-            "toDateTime": datetime.now().strftime("%Y-%m-%dT23:59:59Z"),
-            "callParticipants": [email]
-        }
+    # Search calls in the last 90 days
+    params = {
+        "fromDateTime": (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%dT00:00:00Z"),
+        "toDateTime": datetime.now().strftime("%Y-%m-%dT23:59:59Z")
     }
     
-    result = gong_request("POST", "/v2/calls", payload)
+    result = gong_request("GET", "/v2/calls", params=params)
     
     if not result or "calls" not in result:
         return jsonify({"message": f"No calls found for {email}", "results": []})
     
+    # Filter calls where this email is a participant
     calls = []
     for call in result.get("calls", []):
-        calls.append({
-            "call_id": call.get("id"),
-            "title": call.get("title"),
-            "date": call.get("started"),
-            "duration_seconds": call.get("duration"),
-            "url": call.get("url")
-        })
+        participants = [p.get("emailAddress") for p in call.get("parties", [])]
+        if email.lower() in [p.lower() for p in participants if p]:
+            calls.append({
+                "call_id": call.get("id"),
+                "title": call.get("title"),
+                "date": call.get("started"),
+                "duration_seconds": call.get("duration"),
+                "url": call.get("url")
+            })
     
     return jsonify({
         "email": email,
@@ -428,26 +389,25 @@ def get_full_contact_profile(email: str):
     hubspot_data = format_contact_for_gpt(hubspot_contacts[0]) if hubspot_contacts else {}
     
     # Get Gong calls
-    gong_payload = {
-        "filter": {
-            "fromDateTime": (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%dT00:00:00Z"),
-            "toDateTime": datetime.now().strftime("%Y-%m-%dT23:59:59Z"),
-            "callParticipants": [email]
-        }
+    params = {
+        "fromDateTime": (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%dT00:00:00Z"),
+        "toDateTime": datetime.now().strftime("%Y-%m-%dT23:59:59Z")
     }
     
-    gong_result = gong_request("POST", "/v2/calls", gong_payload)
+    gong_result = gong_request("GET", "/v2/calls", params=params)
     gong_calls = []
     
     if gong_result and "calls" in gong_result:
         for call in gong_result.get("calls", []):
-            gong_calls.append({
-                "call_id": call.get("id"),
-                "title": call.get("title"),
-                "date": call.get("started"),
-                "duration_seconds": call.get("duration"),
-                "url": call.get("url")
-            })
+            participants = [p.get("emailAddress") for p in call.get("parties", [])]
+            if email.lower() in [p.lower() for p in participants if p]:
+                gong_calls.append({
+                    "call_id": call.get("id"),
+                    "title": call.get("title"),
+                    "date": call.get("started"),
+                    "duration_seconds": call.get("duration"),
+                    "url": call.get("url")
+                })
     
     return jsonify({
         "email": email,
@@ -474,7 +434,7 @@ if __name__ == "__main__":
 ║  Gong Endpoints:                                             ║
 ║    POST /gong/calls/search           - Search calls          ║
 ║    GET  /gong/calls/<id>/transcript  - Get transcript        ║
-║    GET  /gong/calls/<id>/stats       - Get stats & trackers  ║
+║    GET  /gong/calls/<id>/stats       - Get stats             ║
 ║    GET  /gong/contacts/<email>/calls - Contact's calls       ║
 ║                                                               ║
 ║  HubSpot Endpoints:                                          ║
