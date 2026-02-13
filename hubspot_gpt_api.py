@@ -257,6 +257,7 @@ def get_call_transcript(call_id: str):
         "call_id": call_id,
         "transcript": formatted_transcript
     })
+    
 @app.route("/gong/calls/<call_id>/stats", methods=["GET"])
 def get_call_stats(call_id: str):
     """Get call statistics including talk ratio and trackers"""
