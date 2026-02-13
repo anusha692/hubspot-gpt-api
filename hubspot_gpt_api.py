@@ -1,21 +1,10 @@
 """
-HubSpot Query API for Custom GPT
-=================================
+HubSpot + Gong Query API for Custom GPT
+========================================
 
-A simple API that allows a Custom GPT to query HubSpot for:
-- Gong call data (transcripts, summaries, competitors, buying signals)
-- Outbound activity (campaigns, replies, sentiment)
-- Contact information
-
-Deployment Options:
-- Render.com (free tier)
-- Railway.app ($5/mo)
-- Vercel (free tier)
-- AWS Lambda + API Gateway
-
-Usage:
-    pip install flask flask-cors requests gunicorn
-    python hubspot_gpt_api.py
+A unified API that allows a Custom GPT to query:
+- Gong call recordings (transcripts, stats, trackers, participants)
+- HubSpot CRM (contacts, deals, with Gong intelligence)
 
 For production:
     gunicorn hubspot_gpt_api:app --bind 0.0.0.0:$PORT
@@ -25,24 +14,64 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 import os
+from datetime import datetime, timedelta
+import base64
 
 app = Flask(__name__)
-CORS(app)  # Allow GPT to call this API
+CORS(app)
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-# Get credentials from environment variables (required)
+# HubSpot credentials
 HUBSPOT_ACCESS_TOKEN = os.environ.get("HUBSPOT_ACCESS_TOKEN")
 HUBSPOT_BASE_URL = "https://api.hubapi.com"
 
-# Optional: Add a simple API key for your GPT
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+# Gong credentials
+GONG_BASE_URL = os.environ.get("GONG_BASE_URL", "https://us-22394.api.gong.io")
+GONG_API_KEY = os.environ.get("GONG_API_KEY")
+GONG_API_SECRET = os.environ.get("GONG_API_SECRET")
 
 # Validate required environment variables
 if not HUBSPOT_ACCESS_TOKEN:
     raise ValueError("HUBSPOT_ACCESS_TOKEN environment variable is required")
+if not GONG_API_KEY or not GONG_API_SECRET:
+    raise ValueError("GONG_API_KEY and GONG_API_SECRET environment variables are required")
+
+# ============================================================================
+# GONG CLIENT
+# ============================================================================
+
+def gong_request(method, endpoint, json_data=None, params=None):
+    """Make a request to Gong API with Basic Auth"""
+    # Gong uses Basic Auth with API key as username and secret as password
+    auth_string = f"{GONG_API_KEY}:{GONG_API_SECRET}"
+    auth_bytes = auth_string.encode('ascii')
+    base64_bytes = base64.b64encode(auth_bytes)
+    base64_auth = base64_bytes.decode('ascii')
+    
+    headers = {
+        "Authorization": f"Basic {base64_auth}",
+        "Content-Type": "application/json"
+    }
+    
+    url = f"{GONG_BASE_URL}{endpoint}"
+    
+    try:
+        if method == "GET":
+            response = requests.get(url, headers=headers, params=params)
+        elif method == "POST":
+            response = requests.post(url, headers=headers, json=json_data)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"Gong API Error: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        print(f"Gong API Exception: {str(e)}")
+        return None
 
 
 # ============================================================================
@@ -68,43 +97,24 @@ def hubspot_request(method, endpoint, json_data=None):
 
 def search_contacts(query: str, search_by: str = "email") -> list:
     """Search HubSpot contacts by email or company"""
-    
-    # Properties to fetch
     properties = [
         "email", "firstname", "lastname", "company", "jobtitle",
         "sector", "industry",
-        # Gong fields
         "latest_call_date", "latest_call_duration", "latest_call_gong_url",
         "latest_call_summary", "gong_total_calls", "gong_buying_signals",
         "gong_competitor_mentioned", "gong_topics_discussed", "gong_next_steps",
         "pain_points_mentioned", "gong_last_sentiment",
-        # Outbound fields
         "outbound_platform", "latest_outbound_campaign", "latest_outbound_date",
         "has_responded", "reply_sentiment", "latest_response_text",
-        # Website
         "has_visited_website"
     ]
     
-    # Build filter based on search type
     if search_by == "email":
-        filters = [{
-            "propertyName": "email",
-            "operator": "CONTAINS_TOKEN",
-            "value": query
-        }]
+        filters = [{"propertyName": "email", "operator": "CONTAINS_TOKEN", "value": query}]
     elif search_by == "company":
-        filters = [{
-            "propertyName": "company",
-            "operator": "CONTAINS_TOKEN", 
-            "value": query
-        }]
+        filters = [{"propertyName": "company", "operator": "CONTAINS_TOKEN", "value": query}]
     else:
-        # Search both
-        filters = [{
-            "propertyName": "email",
-            "operator": "CONTAINS_TOKEN",
-            "value": query
-        }]
+        filters = [{"propertyName": "email", "operator": "CONTAINS_TOKEN", "value": query}]
     
     payload = {
         "filterGroups": [{"filters": filters}],
@@ -159,7 +169,195 @@ def format_contact_for_gpt(contact: dict) -> dict:
 
 
 # ============================================================================
-# API ENDPOINTS
+# GONG API ENDPOINTS
+# ============================================================================
+
+@app.route("/gong/calls/search", methods=["POST"])
+def search_gong_calls():
+    """
+    Search Gong calls by date range, participants, or topics
+    
+    Request body:
+    {
+        "from_date": "2024-01-01",  // Optional, defaults to 7 days ago
+        "to_date": "2024-01-31",    // Optional, defaults to today
+        "participant_email": "john@example.com",  // Optional
+        "limit": 20  // Optional, defaults to 20
+    }
+    """
+    data = request.json or {}
+    
+    # Default to last 7 days if no dates provided
+    to_date = data.get("to_date") or datetime.now().strftime("%Y-%m-%d")
+    from_date = data.get("from_date") or (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    
+    payload = {
+        "filter": {
+            "fromDateTime": f"{from_date}T00:00:00Z",
+            "toDateTime": f"{to_date}T23:59:59Z"
+        },
+        "contentSelector": {
+            "exposedFields": {
+                "content": True,
+                "structure": True,
+                "parties": True,
+                "interaction": True
+            }
+        }
+    }
+    
+    # Add participant filter if provided
+    if data.get("participant_email"):
+        payload["filter"]["callParticipants"] = [data["participant_email"]]
+    
+    result = gong_request("POST", "/v2/calls", payload)
+    
+    if not result or "calls" not in result:
+        return jsonify({"message": "No calls found", "results": []})
+    
+    # Format calls for GPT
+    calls = []
+    for call in result.get("calls", [])[:data.get("limit", 20)]:
+        calls.append({
+            "call_id": call.get("id"),
+            "title": call.get("title", "Untitled Call"),
+            "started": call.get("started"),
+            "duration_seconds": call.get("duration"),
+            "url": call.get("url"),
+            "participants": [
+                {
+                    "name": p.get("name"),
+                    "email": p.get("emailAddress"),
+                    "user_id": p.get("userId")
+                }
+                for p in call.get("parties", [])
+            ],
+            "direction": call.get("direction"),  # Inbound/Outbound
+            "system": call.get("system"),  # Zoom, Teams, etc.
+        })
+    
+    return jsonify({
+        "message": f"Found {len(calls)} calls from {from_date} to {to_date}",
+        "results": calls
+    })
+
+
+@app.route("/gong/calls/<call_id>/transcript", methods=["GET"])
+def get_call_transcript(call_id: str):
+    """Get the full transcript of a Gong call"""
+    result = gong_request("GET", f"/v2/calls/{call_id}/transcript")
+    
+    if not result:
+        return jsonify({"error": "Call transcript not found"}), 404
+    
+    # Format transcript
+    transcript = result.get("callTranscript", [])
+    formatted_transcript = []
+    
+    for segment in transcript:
+        formatted_transcript.append({
+            "speaker": segment.get("speakerName", "Unknown"),
+            "speaker_id": segment.get("speakerId"),
+            "text": segment.get("text", ""),
+            "start_time": segment.get("start"),
+            "duration": segment.get("duration")
+        })
+    
+    return jsonify({
+        "call_id": call_id,
+        "transcript": formatted_transcript
+    })
+
+
+@app.route("/gong/calls/<call_id>/stats", methods=["GET"])
+def get_call_stats(call_id: str):
+    """Get call statistics including talk ratio and trackers"""
+    result = gong_request("GET", f"/v2/calls/{call_id}")
+    
+    if not result:
+        return jsonify({"error": "Call not found"}), 404
+    
+    call_data = result.get("calls", [{}])[0]
+    
+    # Extract tracker mentions
+    trackers = call_data.get("trackers", [])
+    competitors = []
+    pain_points = []
+    objections = []
+    buying_signals = []
+    
+    for tracker in trackers:
+        tracker_name = tracker.get("name", "")
+        tracker_type = tracker.get("type", "").lower()
+        
+        if "competitor" in tracker_type:
+            competitors.append(tracker_name)
+        elif "pain" in tracker_type:
+            pain_points.append(tracker_name)
+        elif "objection" in tracker_type:
+            objections.append(tracker_name)
+        elif "buying" in tracker_type or "signal" in tracker_type:
+            buying_signals.append(tracker_name)
+    
+    # Get talk ratio
+    interaction_stats = call_data.get("interaction", {})
+    
+    return jsonify({
+        "call_id": call_id,
+        "title": call_data.get("title"),
+        "url": call_data.get("url"),
+        "duration_seconds": call_data.get("duration"),
+        "talk_ratio": {
+            "rep_talk_percentage": interaction_stats.get("speakerTalkRatio", {}).get("rep", 0),
+            "prospect_talk_percentage": interaction_stats.get("speakerTalkRatio", {}).get("prospect", 0)
+        },
+        "trackers": {
+            "competitors": competitors,
+            "pain_points": pain_points,
+            "objections": objections,
+            "buying_signals": buying_signals
+        },
+        "outcome": call_data.get("outcome"),
+        "sentiment": call_data.get("sentiment")
+    })
+
+
+@app.route("/gong/contacts/<email>/calls", methods=["GET"])
+def get_contact_calls(email: str):
+    """Get all Gong calls for a specific contact email"""
+    # Search calls where this email is a participant
+    payload = {
+        "filter": {
+            "fromDateTime": (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%dT00:00:00Z"),
+            "toDateTime": datetime.now().strftime("%Y-%m-%dT23:59:59Z"),
+            "callParticipants": [email]
+        }
+    }
+    
+    result = gong_request("POST", "/v2/calls", payload)
+    
+    if not result or "calls" not in result:
+        return jsonify({"message": f"No calls found for {email}", "results": []})
+    
+    calls = []
+    for call in result.get("calls", []):
+        calls.append({
+            "call_id": call.get("id"),
+            "title": call.get("title"),
+            "date": call.get("started"),
+            "duration_seconds": call.get("duration"),
+            "url": call.get("url")
+        })
+    
+    return jsonify({
+        "email": email,
+        "total_calls": len(calls),
+        "calls": calls
+    })
+
+
+# ============================================================================
+# HUBSPOT API ENDPOINTS
 # ============================================================================
 
 @app.route("/", methods=["GET"])
@@ -167,34 +365,28 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "service": "HubSpot GPT Query API",
-        "version": "1.0.0"
+        "service": "HubSpot + Gong GPT Query API",
+        "version": "2.0.0",
+        "integrations": {
+            "hubspot": "connected",
+            "gong": "connected"
+        }
     })
 
 
-@app.route("/search", methods=["POST"])
-def search():
-    """
-    Search for contacts and return Gong/outbound data
-    
-    Request body:
-    {
-        "query": "john@acme.com" or "Acme Corp",
-        "search_by": "email" or "company" (optional, default: auto-detect)
-    }
-    """
+@app.route("/hubspot/search", methods=["POST"])
+def search_hubspot():
+    """Search HubSpot contacts"""
     data = request.json or {}
     query = data.get("query", "").strip()
     
     if not query:
         return jsonify({"error": "Please provide a search query"}), 400
     
-    # Auto-detect search type
     search_by = data.get("search_by")
     if not search_by:
         search_by = "email" if "@" in query else "company"
     
-    # Search HubSpot
     contacts = search_contacts(query, search_by)
     
     if not contacts:
@@ -203,7 +395,6 @@ def search():
             "results": []
         })
     
-    # Format results
     results = [format_contact_for_gpt(c) for c in contacts]
     
     return jsonify({
@@ -212,11 +403,9 @@ def search():
     })
 
 
-@app.route("/contact/<email>", methods=["GET"])
-def get_contact(email: str):
-    """
-    Get a specific contact by email
-    """
+@app.route("/hubspot/contact/<email>", methods=["GET"])
+def get_hubspot_contact(email: str):
+    """Get a specific HubSpot contact by email"""
     contacts = search_contacts(email, "email")
     
     if not contacts:
@@ -225,194 +414,48 @@ def get_contact(email: str):
     return jsonify(format_contact_for_gpt(contacts[0]))
 
 
-@app.route("/calls/recent", methods=["GET"])
-def recent_calls():
+# ============================================================================
+# UNIFIED ENDPOINTS (HubSpot + Gong)
+# ============================================================================
+
+@app.route("/contact/<email>/full", methods=["GET"])
+def get_full_contact_profile(email: str):
     """
-    Get contacts with recent Gong calls
+    Get complete contact profile: HubSpot CRM data + all Gong calls
     """
-    # Search for contacts with Gong data
-    payload = {
-        "filterGroups": [{
-            "filters": [{
-                "propertyName": "gong_total_calls",
-                "operator": "GT",
-                "value": "0"
-            }]
-        }],
-        "properties": [
-            "email", "firstname", "lastname", "company",
-            "latest_call_date", "latest_call_summary", 
-            "gong_buying_signals", "gong_competitor_mentioned"
-        ],
-        "sorts": [{
-            "propertyName": "latest_call_date",
-            "direction": "DESCENDING"
-        }],
-        "limit": 20
+    # Get HubSpot data
+    hubspot_contacts = search_contacts(email, "email")
+    hubspot_data = format_contact_for_gpt(hubspot_contacts[0]) if hubspot_contacts else {}
+    
+    # Get Gong calls
+    gong_payload = {
+        "filter": {
+            "fromDateTime": (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%dT00:00:00Z"),
+            "toDateTime": datetime.now().strftime("%Y-%m-%dT23:59:59Z"),
+            "callParticipants": [email]
+        }
     }
     
-    result = hubspot_request("POST", "/crm/v3/objects/contacts/search", payload)
+    gong_result = gong_request("POST", "/v2/calls", gong_payload)
+    gong_calls = []
     
-    if not result or "results" not in result:
-        return jsonify({"message": "No recent calls found", "results": []})
-    
-    # Format for GPT
-    calls = []
-    for contact in result["results"]:
-        props = contact.get("properties", {})
-        calls.append({
-            "name": f"{props.get('firstname', '')} {props.get('lastname', '')}".strip(),
-            "email": props.get("email"),
-            "company": props.get("company"),
-            "last_call_date": props.get("latest_call_date"),
-            "summary": props.get("latest_call_summary", "")[:200] + "..." if props.get("latest_call_summary") else "",
-            "buying_signals": props.get("gong_buying_signals", "None"),
-            "competitors": props.get("gong_competitor_mentioned", "None")
-        })
-    
-    return jsonify({
-        "message": f"Found {len(calls)} recent calls",
-        "results": calls
-    })
-
-
-@app.route("/competitors", methods=["GET"])
-def competitor_mentions():
-    """
-    Get contacts where competitors were mentioned
-    """
-    payload = {
-        "filterGroups": [{
-            "filters": [{
-                "propertyName": "gong_competitor_mentioned",
-                "operator": "HAS_PROPERTY"
-            }]
-        }],
-        "properties": [
-            "email", "firstname", "lastname", "company",
-            "latest_call_date", "gong_competitor_mentioned", "latest_call_summary"
-        ],
-        "limit": 20
-    }
-    
-    result = hubspot_request("POST", "/crm/v3/objects/contacts/search", payload)
-    
-    if not result or "results" not in result:
-        return jsonify({"message": "No competitor mentions found", "results": []})
-    
-    mentions = []
-    for contact in result["results"]:
-        props = contact.get("properties", {})
-        if props.get("gong_competitor_mentioned"):
-            mentions.append({
-                "name": f"{props.get('firstname', '')} {props.get('lastname', '')}".strip(),
-                "email": props.get("email"),
-                "company": props.get("company"),
-                "competitors_mentioned": props.get("gong_competitor_mentioned"),
-                "call_date": props.get("latest_call_date"),
-                "context": props.get("latest_call_summary", "")[:200] if props.get("latest_call_summary") else ""
+    if gong_result and "calls" in gong_result:
+        for call in gong_result.get("calls", []):
+            gong_calls.append({
+                "call_id": call.get("id"),
+                "title": call.get("title"),
+                "date": call.get("started"),
+                "duration_seconds": call.get("duration"),
+                "url": call.get("url")
             })
     
     return jsonify({
-        "message": f"Found {len(mentions)} competitor mentions",
-        "results": mentions
-    })
-
-
-@app.route("/buying-signals", methods=["GET"])
-def buying_signals():
-    """
-    Get contacts with buying signals detected
-    """
-    payload = {
-        "filterGroups": [{
-            "filters": [{
-                "propertyName": "gong_buying_signals",
-                "operator": "HAS_PROPERTY"
-            }]
-        }],
-        "properties": [
-            "email", "firstname", "lastname", "company",
-            "latest_call_date", "gong_buying_signals", "latest_call_summary"
-        ],
-        "limit": 20
-    }
-    
-    result = hubspot_request("POST", "/crm/v3/objects/contacts/search", payload)
-    
-    if not result or "results" not in result:
-        return jsonify({"message": "No buying signals found", "results": []})
-    
-    signals = []
-    for contact in result["results"]:
-        props = contact.get("properties", {})
-        if props.get("gong_buying_signals"):
-            signals.append({
-                "name": f"{props.get('firstname', '')} {props.get('lastname', '')}".strip(),
-                "email": props.get("email"),
-                "company": props.get("company"),
-                "buying_signals": props.get("gong_buying_signals"),
-                "call_date": props.get("latest_call_date")
-            })
-    
-    return jsonify({
-        "message": f"Found {len(signals)} contacts with buying signals",
-        "results": signals
-    })
-
-
-@app.route("/replies", methods=["GET"])
-def positive_replies():
-    """
-    Get contacts who replied positively to outreach
-    """
-    sentiment = request.args.get("sentiment", "Positive")
-    
-    payload = {
-        "filterGroups": [{
-            "filters": [
-                {
-                    "propertyName": "has_responded",
-                    "operator": "EQ",
-                    "value": "true"
-                },
-                {
-                    "propertyName": "reply_sentiment",
-                    "operator": "EQ",
-                    "value": sentiment
-                }
-            ]
-        }],
-        "properties": [
-            "email", "firstname", "lastname", "company", "sector",
-            "outbound_platform", "latest_outbound_campaign",
-            "reply_sentiment", "latest_response_text"
-        ],
-        "limit": 20
-    }
-    
-    result = hubspot_request("POST", "/crm/v3/objects/contacts/search", payload)
-    
-    if not result or "results" not in result:
-        return jsonify({"message": f"No {sentiment} replies found", "results": []})
-    
-    replies = []
-    for contact in result["results"]:
-        props = contact.get("properties", {})
-        replies.append({
-            "name": f"{props.get('firstname', '')} {props.get('lastname', '')}".strip(),
-            "email": props.get("email"),
-            "company": props.get("company"),
-            "sector": props.get("sector"),
-            "platform": props.get("outbound_platform"),
-            "campaign": props.get("latest_outbound_campaign"),
-            "sentiment": props.get("reply_sentiment"),
-            "reply_preview": props.get("latest_response_text", "")[:100] if props.get("latest_response_text") else ""
-        })
-    
-    return jsonify({
-        "message": f"Found {len(replies)} {sentiment} replies",
-        "results": replies
+        "email": email,
+        "hubspot_data": hubspot_data,
+        "gong_calls": {
+            "total_calls": len(gong_calls),
+            "recent_calls": gong_calls
+        }
     })
 
 
@@ -426,16 +469,20 @@ if __name__ == "__main__":
     
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
-║           HubSpot GPT Query API                              ║
+║       HubSpot + Gong GPT Query API                           ║
 ╠══════════════════════════════════════════════════════════════╣
-║  Endpoints:                                                  ║
-║    GET  /                  - Health check                    ║
-║    POST /search            - Search contacts                 ║
-║    GET  /contact/<email>   - Get specific contact            ║
-║    GET  /calls/recent      - Recent Gong calls               ║
-║    GET  /competitors       - Competitor mentions             ║
-║    GET  /buying-signals    - Buying signals detected         ║
-║    GET  /replies           - Positive/negative replies       ║
+║  Gong Endpoints:                                             ║
+║    POST /gong/calls/search           - Search calls          ║
+║    GET  /gong/calls/<id>/transcript  - Get transcript        ║
+║    GET  /gong/calls/<id>/stats       - Get stats & trackers  ║
+║    GET  /gong/contacts/<email>/calls - Contact's calls       ║
+║                                                               ║
+║  HubSpot Endpoints:                                          ║
+║    POST /hubspot/search              - Search contacts       ║
+║    GET  /hubspot/contact/<email>     - Get contact           ║
+║                                                               ║
+║  Unified:                                                    ║
+║    GET  /contact/<email>/full        - Full profile          ║
 ╚══════════════════════════════════════════════════════════════╝
     
 Running on http://localhost:{port}
