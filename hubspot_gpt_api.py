@@ -224,22 +224,31 @@ def search_gong_calls():
 @app.route("/gong/calls/<call_id>/transcript", methods=["GET"])
 def get_call_transcript(call_id: str):
     """Get the full transcript of a Gong call"""
-    # Gong API expects POST with JSON body, not GET with query params
-    payload = {"filter": {"callIds": [call_id]}}
+    # Gong requires date range + call IDs
+    payload = {
+        "filter": {
+            "fromDateTime": (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%dT00:00:00Z"),
+            "toDateTime": datetime.now().strftime("%Y-%m-%dT23:59:59Z"),
+            "callIds": [call_id]
+        }
+    }
+    
     result = gong_request("POST", "/v2/calls/transcript", json_data=payload)
     
-    if not result:
+    if not result or not result.get("callTranscripts"):
         return jsonify({"error": "Call transcript not found"}), 404
     
-    # Format transcript
-    transcript = result.get("callTranscript", [])
+    # Get the first (and should be only) transcript
+    call_transcript_data = result.get("callTranscripts", [])[0]
+    transcript_segments = call_transcript_data.get("transcript", [])
+    
     formatted_transcript = []
     
-    for segment in transcript:
+    for segment in transcript_segments:
         formatted_transcript.append({
             "speaker": segment.get("speakerName", "Unknown"),
             "speaker_id": segment.get("speakerId"),
-            "text": segment.get("text", ""),
+            "text": segment.get("topic", ""),  # Gong uses "topic" field for text
             "start_time": segment.get("start"),
             "duration": segment.get("duration")
         })
@@ -248,7 +257,6 @@ def get_call_transcript(call_id: str):
         "call_id": call_id,
         "transcript": formatted_transcript
     })
-
 @app.route("/gong/calls/<call_id>/stats", methods=["GET"])
 def get_call_stats(call_id: str):
     """Get call statistics including talk ratio and trackers"""
