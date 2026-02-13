@@ -33,15 +33,16 @@ CORS(app)  # Allow GPT to call this API
 # CONFIGURATION
 # ============================================================================
 
-# Use environment variable in production, fallback to hardcoded for testing
-HUBSPOT_ACCESS_TOKEN = os.getenv(
-    "HUBSPOT_ACCESS_TOKEN", 
-    "pat-na1-3cbd-0139-41ec-a37f-c4bda54e56ff"
-)
+# Get credentials from environment variables (required)
+HUBSPOT_ACCESS_TOKEN = os.environ.get("HUBSPOT_ACCESS_TOKEN")
 HUBSPOT_BASE_URL = "https://api.hubapi.com"
 
 # Optional: Add a simple API key for your GPT
-GPT_API_KEY = os.getenv("GPT_API_KEY", "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")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+# Validate required environment variables
+if not HUBSPOT_ACCESS_TOKEN:
+    raise ValueError("HUBSPOT_ACCESS_TOKEN environment variable is required")
 
 
 # ============================================================================
@@ -420,8 +421,8 @@ def positive_replies():
 # ============================================================================
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
-    debug = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+    port = int(os.environ.get("PORT", 5000))
+    debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
     
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
