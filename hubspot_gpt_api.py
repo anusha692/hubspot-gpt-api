@@ -224,9 +224,9 @@ def search_gong_calls():
 @app.route("/gong/calls/<call_id>/transcript", methods=["GET"])
 def get_call_transcript(call_id: str):
     """Get the full transcript of a Gong call"""
-    # Gong API uses query parameter, not path parameter
-    params = {"callId": call_id}
-    result = gong_request("GET", "/v2/calls/transcript", params=params)
+    # Gong API expects POST with JSON body, not GET with query params
+    payload = {"filter": {"callIds": [call_id]}}
+    result = gong_request("POST", "/v2/calls/transcript", json_data=payload)
     
     if not result:
         return jsonify({"error": "Call transcript not found"}), 404
@@ -248,7 +248,6 @@ def get_call_transcript(call_id: str):
         "call_id": call_id,
         "transcript": formatted_transcript
     })
-
 
 @app.route("/gong/calls/<call_id>/stats", methods=["GET"])
 def get_call_stats(call_id: str):
