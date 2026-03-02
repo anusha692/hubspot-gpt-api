@@ -473,7 +473,7 @@ def gong_vector_search():
     # Build vector search pipeline
     vector_search_stage = {
         "$vectorSearch": {
-            "index": "vector_index",
+            "index": "vector_index_1",
             "path": "embedding",
             "queryVector": query_embedding,
             "numCandidates": limit * 10,
@@ -516,13 +516,8 @@ def gong_vector_search():
     try:
         results = list(collection.aggregate(pipeline))
     except Exception as e:
-        # If vector_index fails, try "default" index name
-        try:
-            vector_search_stage["$vectorSearch"]["index"] = "default"
-            results = list(collection.aggregate(pipeline))
-        except Exception as e2:
-            mongo_client.close()
-            return jsonify({"error": f"Vector search failed: {str(e)} / fallback: {str(e2)}"}), 500
+        mongo_client.close()
+        return jsonify({"error": f"Vector search failed: {str(e)}"}), 500
 
     # Format results
     matching_calls = []
