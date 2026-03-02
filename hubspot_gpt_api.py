@@ -351,7 +351,7 @@ def debug_mongo():
     """Temporary debug endpoint to check MongoDB contents."""
     mongo_client, collection = get_mongo_collection()
     count = collection.count_documents({})
-    sample = collection.find_one({}, {"embedding": 0})
+    sample = collection.find_one()
     mongo_client.close()
     if sample:
         sample["_id"] = str(sample["_id"])
@@ -359,6 +359,14 @@ def debug_mongo():
             sample["call_date"] = sample["call_date"].isoformat()
         if sample.get("ingested_at"):
             sample["ingested_at"] = sample["ingested_at"].isoformat()
+        emb = sample.get("embedding")
+        sample["embedding_info"] = {
+            "exists": emb is not None,
+            "type": type(emb).__name__ if emb else None,
+            "length": len(emb) if emb else 0,
+            "sample_values": emb[:3] if emb else None,
+        }
+        del sample["embedding"]
     return jsonify({"count": count, "sample": sample})
 
 
