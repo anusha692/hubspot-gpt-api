@@ -346,6 +346,27 @@ def get_contact_calls(email: str):
 # HUBSPOT API ENDPOINTS
 # ============================================================================
 
+@app.route("/debug/gong-parties", methods=["GET"])
+def debug_gong_parties():
+    """Check what Gong returns for call parties."""
+    params = {
+        "fromDateTime": (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%dT00:00:00Z"),
+        "toDateTime": datetime.now().strftime("%Y-%m-%dT23:59:59Z"),
+    }
+    result = gong_request("GET", "/v2/calls", params=params)
+    if not result or "calls" not in result:
+        return jsonify({"error": "No calls found"})
+    # Return first 3 calls with their full parties data
+    samples = []
+    for call in result["calls"][:3]:
+        samples.append({
+            "call_id": call.get("id"),
+            "title": call.get("title"),
+            "parties": call.get("parties"),
+        })
+    return jsonify({"samples": samples})
+
+
 @app.route("/debug/mongo", methods=["GET"])
 def debug_mongo():
     """Temporary debug endpoint to check MongoDB contents."""
