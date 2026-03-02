@@ -346,6 +346,22 @@ def get_contact_calls(email: str):
 # HUBSPOT API ENDPOINTS
 # ============================================================================
 
+@app.route("/debug/mongo", methods=["GET"])
+def debug_mongo():
+    """Temporary debug endpoint to check MongoDB contents."""
+    mongo_client, collection = get_mongo_collection()
+    count = collection.count_documents({})
+    sample = collection.find_one({}, {"embedding": 0})
+    mongo_client.close()
+    if sample:
+        sample["_id"] = str(sample["_id"])
+        if sample.get("call_date"):
+            sample["call_date"] = sample["call_date"].isoformat()
+        if sample.get("ingested_at"):
+            sample["ingested_at"] = sample["ingested_at"].isoformat()
+    return jsonify({"count": count, "sample": sample})
+
+
 @app.route("/", methods=["GET"])
 def health_check():
     """Health check endpoint"""
