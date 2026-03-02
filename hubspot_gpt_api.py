@@ -411,10 +411,23 @@ def get_deal_pipelines():
     List all deal pipelines and their stages.
     Use this to discover stage IDs for filtering deals.
     """
-    result = hubspot_request("GET", "/crm/v3/pipelines/deals")
+    # Direct request to see full error
+    headers = {
+        "Authorization": f"Bearer {HUBSPOT_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    response = requests.get(f"{HUBSPOT_BASE_URL}/crm/v3/pipelines/deals", headers=headers)
 
-    if not result or "results" not in result:
-        return jsonify({"error": "Could not fetch pipelines"}), 500
+    if response.status_code != 200:
+        return jsonify({
+            "error": "Could not fetch pipelines",
+            "status_code": response.status_code,
+            "detail": response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text
+        }), 500
+
+    result = response.json()
+    if "results" not in result:
+        return jsonify({"error": "Unexpected response format", "raw": result}), 500
 
     pipelines = []
     for pipeline in result["results"]:
@@ -569,26 +582,20 @@ def gong_vector_search():
     query_embedding = embed_query(query)
 
     # Build vector search pipeline
+    # Fetch more candidates if date filtering will be applied post-search
+    from_date = data.get("from_date")
+    to_date = data.get("to_date")
+    fetch_limit = limit * 3 if (from_date or to_date) else limit
+
     vector_search_stage = {
         "$vectorSearch": {
             "index": "vector_index_1",
             "path": "embedding",
             "queryVector": query_embedding,
-            "numCandidates": limit * 10,
-            "limit": limit,
+            "numCandidates": fetch_limit * 10,
+            "limit": fetch_limit,
         }
     }
-
-    # Add date filter if provided
-    from_date = data.get("from_date")
-    to_date = data.get("to_date")
-    if from_date or to_date:
-        date_filter = {}
-        if from_date:
-            date_filter["$gte"] = datetime.fromisoformat(from_date)
-        if to_date:
-            date_filter["$lte"] = datetime.fromisoformat(to_date + "T23:59:59")
-        vector_search_stage["$vectorSearch"]["filter"] = {"call_date": date_filter}
 
     pipeline = [
         vector_search_stage,
@@ -608,6 +615,17 @@ def gong_vector_search():
             }
         },
     ]
+
+    # Apply date filter after vector search (not inside $vectorSearch)
+    if from_date or to_date:
+        date_match = {}
+        if from_date:
+            date_match["$gte"] = datetime.fromisoformat(from_date)
+        if to_date:
+            date_match["$lte"] = datetime.fromisoformat(to_date + "T23:59:59")
+        pipeline.append({"$match": {"call_date": date_match}})
+
+    pipeline.append({"$limit": limit})
 
     mongo_client, collection = get_mongo_collection()
 
