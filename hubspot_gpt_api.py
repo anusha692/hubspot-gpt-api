@@ -405,6 +405,36 @@ def get_hubspot_contact(email: str):
 # ============================================================================
 
 
+@app.route("/hubspot/deals/pipelines", methods=["GET"])
+def get_deal_pipelines():
+    """
+    List all deal pipelines and their stages.
+    Use this to discover stage IDs for filtering deals.
+    """
+    result = hubspot_request("GET", "/crm/v3/pipelines/deals")
+
+    if not result or "results" not in result:
+        return jsonify({"error": "Could not fetch pipelines"}), 500
+
+    pipelines = []
+    for pipeline in result["results"]:
+        stages = []
+        for stage in pipeline.get("stages", []):
+            stages.append({
+                "stage_id": stage.get("id"),
+                "label": stage.get("label"),
+                "display_order": stage.get("displayOrder"),
+                "metadata": stage.get("metadata", {}),
+            })
+        pipelines.append({
+            "pipeline_id": pipeline.get("id"),
+            "label": pipeline.get("label"),
+            "stages": stages,
+        })
+
+    return jsonify({"pipelines": pipelines})
+
+
 @app.route("/hubspot/deals/search", methods=["POST"])
 def search_hubspot_deals():
     """
@@ -412,7 +442,7 @@ def search_hubspot_deals():
 
     Request body:
     {
-        "stage": "closedwon",           // Optional: closedwon, closedlost, or any stage
+        "stage": "closedwon",           // Optional: stage name or internal stage ID
         "from_date": "2025-12-01",      // Optional: filter by close date
         "to_date": "2026-03-01",        // Optional: filter by close date
         "company": "FINN Partners",     // Optional: filter by dealname or company
@@ -422,7 +452,8 @@ def search_hubspot_deals():
     data = request.json or {}
     filters = []
 
-    stage = data.get("stage")
+    # Accept either "stage" or "dealstage" parameter
+    stage = data.get("stage") or data.get("dealstage")
     if stage:
         filters.append({
             "propertyName": "dealstage",

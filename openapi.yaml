@@ -284,6 +284,40 @@ paths:
                             company:
                               type: string
 
+  /hubspot/deals/pipelines:
+    get:
+      operationId: getDealPipelines
+      summary: List all deal pipelines and their stages. Call this first to discover stage IDs before searching deals.
+      responses:
+        "200":
+          description: List of pipelines with stage IDs and labels
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pipelines:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        pipeline_id:
+                          type: string
+                        label:
+                          type: string
+                        stages:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              stage_id:
+                                type: string
+                                description: Use this ID when filtering deals by stage
+                              label:
+                                type: string
+                              display_order:
+                                type: integer
+
   /hubspot/deals/search:
     post:
       operationId: searchHubSpotDeals
@@ -297,7 +331,7 @@ paths:
               properties:
                 stage:
                   type: string
-                  description: "Deal stage to filter by (e.g. closedwon, closedlost)"
+                  description: "Deal stage ID to filter by. Call /hubspot/deals/pipelines first to get the correct stage IDs for your pipeline."
                 from_date:
                   type: string
                   description: Filter deals closed on or after this date (YYYY-MM-DD)
