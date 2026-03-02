@@ -516,8 +516,13 @@ def gong_vector_search():
     try:
         results = list(collection.aggregate(pipeline))
     except Exception as e:
-        mongo_client.close()
-        return jsonify({"error": f"Vector search failed: {str(e)}"}), 500
+        # If vector_index fails, try "default" index name
+        try:
+            vector_search_stage["$vectorSearch"]["index"] = "default"
+            results = list(collection.aggregate(pipeline))
+        except Exception as e2:
+            mongo_client.close()
+            return jsonify({"error": f"Vector search failed: {str(e)} / fallback: {str(e2)}"}), 500
 
     # Format results
     matching_calls = []
