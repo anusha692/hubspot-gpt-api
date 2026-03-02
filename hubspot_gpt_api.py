@@ -401,6 +401,97 @@ def get_hubspot_contact(email: str):
 
 
 # ============================================================================
+# HUBSPOT DEALS ENDPOINTS
+# ============================================================================
+
+
+@app.route("/hubspot/deals/search", methods=["POST"])
+def search_hubspot_deals():
+    """
+    Search HubSpot deals by stage, date range, or company name.
+
+    Request body:
+    {
+        "stage": "closedwon",           // Optional: closedwon, closedlost, or any stage
+        "from_date": "2025-12-01",      // Optional: filter by close date
+        "to_date": "2026-03-01",        // Optional: filter by close date
+        "company": "FINN Partners",     // Optional: filter by dealname or company
+        "limit": 100                    // Optional, defaults to 100
+    }
+    """
+    data = request.json or {}
+    filters = []
+
+    stage = data.get("stage")
+    if stage:
+        filters.append({
+            "propertyName": "dealstage",
+            "operator": "EQ",
+            "value": stage
+        })
+
+    from_date = data.get("from_date")
+    if from_date:
+        # HubSpot expects millisecond timestamps
+        ts = int(datetime.fromisoformat(from_date).timestamp() * 1000)
+        filters.append({
+            "propertyName": "closedate",
+            "operator": "GTE",
+            "value": str(ts)
+        })
+
+    to_date = data.get("to_date")
+    if to_date:
+        ts = int(datetime.fromisoformat(to_date + "T23:59:59").timestamp() * 1000)
+        filters.append({
+            "propertyName": "closedate",
+            "operator": "LTE",
+            "value": str(ts)
+        })
+
+    company = data.get("company")
+    if company:
+        filters.append({
+            "propertyName": "dealname",
+            "operator": "CONTAINS_TOKEN",
+            "value": company
+        })
+
+    payload = {
+        "filterGroups": [{"filters": filters}] if filters else [],
+        "properties": [
+            "dealname", "dealstage", "amount", "closedate",
+            "pipeline", "hs_lastmodifieddate"
+        ],
+        "sorts": [{"propertyName": "closedate", "direction": "DESCENDING"}],
+        "limit": data.get("limit", 100)
+    }
+
+    result = hubspot_request("POST", "/crm/v3/objects/deals/search", payload)
+
+    if not result or "results" not in result:
+        return jsonify({"message": "No deals found", "results": [], "total": 0})
+
+    deals = []
+    for deal in result["results"]:
+        props = deal.get("properties", {})
+        deals.append({
+            "deal_id": deal.get("id"),
+            "name": props.get("dealname", ""),
+            "stage": props.get("dealstage", ""),
+            "amount": props.get("amount", ""),
+            "close_date": props.get("closedate", ""),
+            "pipeline": props.get("pipeline", ""),
+        })
+
+    return jsonify({
+        "message": f"Found {len(deals)} deals",
+        "total": result.get("total", len(deals)),
+        "results": deals
+    })
+
+
+# ============================================================================
 # GONG VECTOR SEARCH ENDPOINTS
 # ============================================================================
 
@@ -640,6 +731,7 @@ if __name__ == "__main__":
 ║  HubSpot Endpoints:                                          ║
 ║    POST /hubspot/search              - Search contacts       ║
 ║    GET  /hubspot/contact/<email>     - Get contact           ║
+║    POST /hubspot/deals/search        - Search deals          ║
 ║                                                               ║
 ║  Unified:                                                    ║
 ║    GET  /contact/<email>/full        - Full profile          ║

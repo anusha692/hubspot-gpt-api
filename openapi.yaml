@@ -1,0 +1,427 @@
+openapi: 3.1.0
+info:
+  title: HubSpot + Gong Sales Intelligence API
+  description: Query Gong call recordings, search transcripts semantically, and look up HubSpot CRM data.
+  version: 3.0.0
+servers:
+  - url: https://hubspot-gpt-api-w80a.onrender.com
+paths:
+  /gong/calls/search:
+    post:
+      operationId: searchGongCalls
+      summary: Search Gong calls by date range
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                from_date:
+                  type: string
+                  description: Start date (YYYY-MM-DD). Defaults to 7 days ago.
+                to_date:
+                  type: string
+                  description: End date (YYYY-MM-DD). Defaults to today.
+                limit:
+                  type: integer
+                  description: Max results to return. Defaults to 20.
+      responses:
+        "200":
+          description: List of calls
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        call_id:
+                          type: string
+                        title:
+                          type: string
+                        started:
+                          type: string
+                        duration_seconds:
+                          type: number
+                        url:
+                          type: string
+                        participants:
+                          type: array
+                          items:
+                            type: string
+                        direction:
+                          type: string
+
+  /gong/calls/{call_id}/transcript:
+    get:
+      operationId: getCallTranscript
+      summary: Get full transcript of a Gong call
+      parameters:
+        - name: call_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Call transcript broken down by speaker segments
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  call_id:
+                    type: string
+                  transcript:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        speaker_id:
+                          type: string
+                        topic:
+                          type: string
+                        text:
+                          type: string
+                        start_time:
+                          type: number
+                        end_time:
+                          type: number
+        "404":
+          description: Transcript not found
+
+  /gong/calls/{call_id}/stats:
+    get:
+      operationId: getCallStats
+      summary: Get call statistics
+      parameters:
+        - name: call_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Call stats
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  call_id:
+                    type: string
+                  title:
+                    type: string
+                  url:
+                    type: string
+                  duration_seconds:
+                    type: number
+                  started:
+                    type: string
+                  direction:
+                    type: string
+                  participants:
+                    type: array
+                    items:
+                      type: string
+        "404":
+          description: Call not found
+
+  /gong/contacts/{email}/calls:
+    get:
+      operationId: getContactCalls
+      summary: Get all Gong calls for a specific contact email
+      parameters:
+        - name: email
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of calls for the contact
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email:
+                    type: string
+                  total_calls:
+                    type: integer
+                  calls:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        call_id:
+                          type: string
+                        title:
+                          type: string
+                        date:
+                          type: string
+                        duration_seconds:
+                          type: number
+                        url:
+                          type: string
+
+  /gong/search:
+    post:
+      operationId: searchTranscripts
+      summary: Semantic search across all Gong transcripts. Use this to find calls mentioning specific topics, stories, phrases, or patterns.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - query
+              properties:
+                query:
+                  type: string
+                  description: Natural language search query (e.g. "Derek story", "pricing objection", "competitor mention")
+                from_date:
+                  type: string
+                  description: Optional start date filter (YYYY-MM-DD)
+                to_date:
+                  type: string
+                  description: Optional end date filter (YYYY-MM-DD)
+                limit:
+                  type: integer
+                  description: Max results to return. Defaults to 20.
+      responses:
+        "200":
+          description: Matching transcript chunks with call metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query:
+                    type: string
+                  matching_chunks:
+                    type: integer
+                  unique_calls:
+                    type: integer
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        call_id:
+                          type: string
+                        call_title:
+                          type: string
+                          description: "Call title, typically formatted as 'Company (Contact) <> Clipbook (Rep)'. Use the company name to cross-reference with HubSpot."
+                        call_date:
+                          type: string
+                        call_url:
+                          type: string
+                        speaker_id:
+                          type: string
+                        topic:
+                          type: string
+                        text:
+                          type: string
+                          description: The transcript snippet that matched the query
+                        start_time:
+                          type: number
+                        end_time:
+                          type: number
+                        score:
+                          type: number
+                          description: Relevance score (0 to 1, higher is more relevant)
+
+  /hubspot/search:
+    post:
+      operationId: searchHubSpot
+      summary: Search HubSpot contacts by email or company name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - query
+              properties:
+                query:
+                  type: string
+                  description: Email address or company name to search for
+                search_by:
+                  type: string
+                  enum: [email, company]
+                  description: Field to search by. Auto-detected if not provided (email if contains @, otherwise company).
+      responses:
+        "200":
+          description: Matching contacts with CRM and Gong intelligence data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        contact:
+                          type: object
+                          properties:
+                            name:
+                              type: string
+                            email:
+                              type: string
+                            company:
+                              type: string
+
+  /hubspot/deals/search:
+    post:
+      operationId: searchHubSpotDeals
+      summary: Search HubSpot deals by stage, date range, or company name. Use this to get deal outcomes (closed-won, closed-lost) for correlation analysis.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                stage:
+                  type: string
+                  description: "Deal stage to filter by (e.g. closedwon, closedlost)"
+                from_date:
+                  type: string
+                  description: Filter deals closed on or after this date (YYYY-MM-DD)
+                to_date:
+                  type: string
+                  description: Filter deals closed on or before this date (YYYY-MM-DD)
+                company:
+                  type: string
+                  description: Filter by company/deal name (partial match)
+                limit:
+                  type: integer
+                  description: Max results to return. Defaults to 100.
+      responses:
+        "200":
+          description: List of matching deals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  total:
+                    type: integer
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        deal_id:
+                          type: string
+                        name:
+                          type: string
+                        stage:
+                          type: string
+                        amount:
+                          type: string
+                        close_date:
+                          type: string
+                        pipeline:
+                          type: string
+
+  /hubspot/contact/{email}:
+    get:
+      operationId: getHubSpotContact
+      summary: Get a specific HubSpot contact by email
+      parameters:
+        - name: email
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Contact details with Gong intelligence
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  contact:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      email:
+                        type: string
+                      company:
+                        type: string
+                      title:
+                        type: string
+                  gong_calls:
+                    type: object
+                    properties:
+                      total_calls:
+                        type: string
+                      call_summary:
+                        type: string
+        "404":
+          description: Contact not found
+
+  /contact/{email}/full:
+    get:
+      operationId: getFullContactProfile
+      summary: Get complete contact profile combining HubSpot CRM data and all Gong calls
+      parameters:
+        - name: email
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Full contact profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email:
+                    type: string
+                  hubspot_data:
+                    type: object
+                    properties:
+                      contact:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          email:
+                            type: string
+                          company:
+                            type: string
+                  gong_calls:
+                    type: object
+                    properties:
+                      total_calls:
+                        type: integer
+                      recent_calls:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            call_id:
+                              type: string
+                            title:
+                              type: string
