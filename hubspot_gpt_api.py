@@ -17,6 +17,9 @@ import os
 from datetime import datetime, timedelta
 import base64
 
+from openai import OpenAI
+from pymongo import MongoClient
+
 app = Flask(__name__)
 CORS(app)
 
@@ -32,6 +35,12 @@ HUBSPOT_BASE_URL = "https://api.hubapi.com"
 GONG_BASE_URL = os.environ.get("GONG_BASE_URL", "https://us-22394.api.gong.io")
 GONG_API_KEY = os.environ.get("GONG_API_KEY")
 GONG_API_SECRET = os.environ.get("GONG_API_SECRET")
+
+# MongoDB Atlas
+MONGODB_URI = os.environ.get("MONGODB_URI")
+
+# OpenAI
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 # Validate required environment variables
 if not HUBSPOT_ACCESS_TOKEN:
@@ -392,6 +401,315 @@ def get_hubspot_contact(email: str):
 
 
 # ============================================================================
+# GONG VECTOR SEARCH ENDPOINTS
+# ============================================================================
+
+
+def get_mongo_collection():
+    """Get the MongoDB collection for transcript chunks."""
+    client = MongoClient(MONGODB_URI)
+    db = client["gong"]
+    return client, db["gong_transcripts"]
+
+
+def embed_query(text):
+    """Embed a query string using OpenAI."""
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    response = client.embeddings.create(model="text-embedding-3-small", input=text)
+    return response.data[0].embedding
+
+
+@app.route("/gong/search", methods=["POST"])
+def gong_vector_search():
+    """
+    Semantic search across Gong transcripts using MongoDB Atlas vector search.
+
+    Request body:
+    {
+        "query": "Derek story",
+        "from_date": "2025-12-01",   // Optional
+        "to_date": "2026-03-01",     // Optional
+        "limit": 20                  // Optional, defaults to 20
+    }
+    """
+    data = request.json or {}
+    query = data.get("query", "").strip()
+
+    if not query:
+        return jsonify({"error": "Please provide a search query"}), 400
+
+    if not MONGODB_URI or not OPENAI_API_KEY:
+        return jsonify({"error": "MONGODB_URI and OPENAI_API_KEY must be configured"}), 500
+
+    limit = data.get("limit", 20)
+
+    # Embed the query
+    query_embedding = embed_query(query)
+
+    # Build vector search pipeline
+    vector_search_stage = {
+        "$vectorSearch": {
+            "index": "vector_index",
+            "path": "embedding",
+            "queryVector": query_embedding,
+            "numCandidates": limit * 10,
+            "limit": limit,
+        }
+    }
+
+    # Add date filter if provided
+    from_date = data.get("from_date")
+    to_date = data.get("to_date")
+    if from_date or to_date:
+        date_filter = {}
+        if from_date:
+            date_filter["$gte"] = datetime.fromisoformat(from_date)
+        if to_date:
+            date_filter["$lte"] = datetime.fromisoformat(to_date + "T23:59:59")
+        vector_search_stage["$vectorSearch"]["filter"] = {"call_date": date_filter}
+
+    pipeline = [
+        vector_search_stage,
+        {
+            "$project": {
+                "call_id": 1,
+                "call_title": 1,
+                "call_date": 1,
+                "call_url": 1,
+                "participants": 1,
+                "speaker_id": 1,
+                "topic": 1,
+                "text": 1,
+                "start_time": 1,
+                "end_time": 1,
+                "score": {"$meta": "vectorSearchScore"},
+            }
+        },
+    ]
+
+    mongo_client, collection = get_mongo_collection()
+
+    try:
+        results = list(collection.aggregate(pipeline))
+    except Exception as e:
+        mongo_client.close()
+        return jsonify({"error": f"Vector search failed: {str(e)}"}), 500
+
+    # Format results
+    matching_calls = []
+    seen_call_ids = set()
+    all_participants = set()
+
+    for r in results:
+        r["_id"] = str(r["_id"])
+        if r.get("call_date"):
+            r["call_date"] = r["call_date"].isoformat()
+        matching_calls.append(r)
+        seen_call_ids.add(r.get("call_id"))
+        for p in r.get("participants", []):
+            all_participants.add(p)
+
+    # Cross-reference with HubSpot deals for correlation
+    deal_correlation = None
+    if all_participants:
+        deal_correlation = compute_deal_correlation(
+            all_participants, from_date, to_date
+        )
+
+    mongo_client.close()
+
+    response = {
+        "query": query,
+        "matching_chunks": len(matching_calls),
+        "unique_calls": len(seen_call_ids),
+        "results": matching_calls,
+    }
+    if deal_correlation:
+        response["deal_correlation"] = deal_correlation
+
+    return jsonify(response)
+
+
+def compute_deal_correlation(participant_emails, from_date, to_date):
+    """
+    For the given participant emails, find associated HubSpot deals
+    and compute win-rate correlation.
+    """
+    closed_won = 0
+    closed_lost = 0
+    deal_ids_seen = set()
+
+    for email in participant_emails:
+        # Find contact by email
+        contacts = search_contacts(email, "email")
+        if not contacts:
+            continue
+
+        contact_id = contacts[0].get("id")
+        if not contact_id:
+            continue
+
+        # Get associated deals
+        assoc_result = hubspot_request(
+            "GET", f"/crm/v4/objects/contacts/{contact_id}/associations/deals"
+        )
+        if not assoc_result or "results" not in assoc_result:
+            continue
+
+        for assoc in assoc_result["results"]:
+            deal_id = assoc.get("toObjectId")
+            if not deal_id or deal_id in deal_ids_seen:
+                continue
+            deal_ids_seen.add(deal_id)
+
+            # Get deal properties
+            deal_result = hubspot_request(
+                "GET",
+                f"/crm/v3/objects/deals/{deal_id}?properties=dealstage,dealname,amount,closedate",
+            )
+            if not deal_result:
+                continue
+
+            stage = deal_result.get("properties", {}).get("dealstage", "")
+            if stage == "closedwon":
+                closed_won += 1
+            elif stage == "closedlost":
+                closed_lost += 1
+
+    total_with_outcome = closed_won + closed_lost
+    if total_with_outcome == 0:
+        return None
+
+    # Get baseline: total deals in the same period
+    baseline = get_baseline_deal_stats(from_date, to_date)
+
+    correlation = {
+        "calls_with_match": len(deal_ids_seen),
+        "closed_won": closed_won,
+        "closed_lost": closed_lost,
+        "match_win_rate": f"{round(closed_won / total_with_outcome * 100)}%",
+    }
+
+    if baseline:
+        correlation["total_deals_in_period"] = baseline["total"]
+        correlation["baseline_win_rate"] = baseline["win_rate"]
+
+    return correlation
+
+
+def get_baseline_deal_stats(from_date, to_date):
+    """Get overall deal win rate for a date range as baseline comparison."""
+    filters = []
+    if from_date:
+        filters.append(
+            {
+                "propertyName": "closedate",
+                "operator": "GTE",
+                "value": datetime.fromisoformat(from_date).strftime("%s000"),
+            }
+        )
+    if to_date:
+        filters.append(
+            {
+                "propertyName": "closedate",
+                "operator": "LTE",
+                "value": datetime.fromisoformat(to_date + "T23:59:59").strftime("%s000"),
+            }
+        )
+
+    # Only count closed deals
+    filters.append(
+        {
+            "propertyName": "dealstage",
+            "operator": "IN",
+            "values": ["closedwon", "closedlost"],
+        }
+    )
+
+    payload = {
+        "filterGroups": [{"filters": filters}],
+        "properties": ["dealstage"],
+        "limit": 100,
+    }
+
+    result = hubspot_request("POST", "/crm/v3/objects/deals/search", payload)
+    if not result or "results" not in result:
+        return None
+
+    deals = result["results"]
+    total = len(deals)
+    won = sum(
+        1 for d in deals if d.get("properties", {}).get("dealstage") == "closedwon"
+    )
+
+    if total == 0:
+        return None
+
+    return {
+        "total": total,
+        "won": won,
+        "lost": total - won,
+        "win_rate": f"{round(won / total * 100)}%",
+    }
+
+
+@app.route("/gong/ingest", methods=["POST"])
+def trigger_gong_ingest():
+    """
+    Trigger Gong transcript ingestion into MongoDB Atlas.
+
+    Request body:
+    {
+        "days_back": 90  // Optional, defaults to 90
+    }
+    """
+    from gong_ingest import ingest_calls
+
+    data = request.json or {}
+    days_back = data.get("days_back", 90)
+
+    try:
+        count = ingest_calls(days_back=days_back)
+        return jsonify({"message": f"Ingested {count} new calls", "calls_ingested": count})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/gong/webhook", methods=["POST"])
+def gong_webhook():
+    """
+    Webhook endpoint for Gong to notify when a call is analyzed.
+
+    Gong sends a POST with the call ID when transcription is complete.
+    This triggers automatic ingestion of the new call into MongoDB.
+
+    Register this URL in Gong: Settings > API > Webhooks
+    Event type: CALL_ANALYZED
+    """
+    from gong_ingest import ingest_single_call
+
+    data = request.json or {}
+
+    # Handle Gong webhook verification (ping)
+    if data.get("type") == "WEBHOOK_VALIDATION":
+        return jsonify({"status": "ok"})
+
+    call_id = data.get("callId") or data.get("data", {}).get("callId")
+    if not call_id:
+        return jsonify({"error": "No callId in webhook payload"}), 400
+
+    try:
+        ingested = ingest_single_call(call_id)
+        if ingested:
+            return jsonify({"message": f"Call {call_id} ingested successfully"})
+        else:
+            return jsonify({"message": f"Call {call_id} skipped (already ingested or no transcript)"})
+    except Exception as e:
+        print(f"Webhook ingestion error for call {call_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================================
 # UNIFIED ENDPOINTS (HubSpot + Gong)
 # ============================================================================
 
@@ -452,6 +770,9 @@ if __name__ == "__main__":
 ║    GET  /gong/calls/<id>/transcript  - Get transcript        ║
 ║    GET  /gong/calls/<id>/stats       - Get stats             ║
 ║    GET  /gong/contacts/<email>/calls - Contact's calls       ║
+║    POST /gong/search                 - Vector search         ║
+║    POST /gong/ingest                 - Trigger ingestion     ║
+║    POST /gong/webhook                - Gong webhook          ║
 ║                                                               ║
 ║  HubSpot Endpoints:                                          ║
 ║    POST /hubspot/search              - Search contacts       ║
