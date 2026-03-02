@@ -346,51 +346,6 @@ def get_contact_calls(email: str):
 # HUBSPOT API ENDPOINTS
 # ============================================================================
 
-@app.route("/debug/gong-parties", methods=["GET"])
-def debug_gong_parties():
-    """Check what Gong returns for call parties."""
-    params = {
-        "fromDateTime": (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%dT00:00:00Z"),
-        "toDateTime": datetime.now().strftime("%Y-%m-%dT23:59:59Z"),
-    }
-    result = gong_request("GET", "/v2/calls", params=params)
-    if not result or "calls" not in result:
-        return jsonify({"error": "No calls found"})
-    # Return first 3 calls with their full parties data
-    samples = []
-    for call in result["calls"][:3]:
-        samples.append({
-            "call_id": call.get("id"),
-            "title": call.get("title"),
-            "parties": call.get("parties"),
-        })
-    return jsonify({"samples": samples})
-
-
-@app.route("/debug/mongo", methods=["GET"])
-def debug_mongo():
-    """Temporary debug endpoint to check MongoDB contents."""
-    mongo_client, collection = get_mongo_collection()
-    count = collection.count_documents({})
-    sample = collection.find_one()
-    mongo_client.close()
-    if sample:
-        sample["_id"] = str(sample["_id"])
-        if sample.get("call_date"):
-            sample["call_date"] = sample["call_date"].isoformat()
-        if sample.get("ingested_at"):
-            sample["ingested_at"] = sample["ingested_at"].isoformat()
-        emb = sample.get("embedding")
-        sample["embedding_info"] = {
-            "exists": emb is not None,
-            "type": type(emb).__name__ if emb else None,
-            "length": len(emb) if emb else 0,
-            "sample_values": emb[:3] if emb else None,
-        }
-        del sample["embedding"]
-    return jsonify({"count": count, "sample": sample})
-
-
 @app.route("/", methods=["GET"])
 def health_check():
     """Health check endpoint"""
@@ -543,7 +498,6 @@ def gong_vector_search():
     # Format results
     matching_calls = []
     seen_call_ids = set()
-    all_participants = set()
 
     for r in results:
         r["_id"] = str(r["_id"])
@@ -551,151 +505,15 @@ def gong_vector_search():
             r["call_date"] = r["call_date"].isoformat()
         matching_calls.append(r)
         seen_call_ids.add(r.get("call_id"))
-        for p in r.get("participants", []):
-            all_participants.add(p)
-
-    # Cross-reference with HubSpot deals for correlation
-    deal_correlation = None
-    if all_participants:
-        deal_correlation = compute_deal_correlation(
-            all_participants, from_date, to_date
-        )
 
     mongo_client.close()
 
-    response = {
+    return jsonify({
         "query": query,
         "matching_chunks": len(matching_calls),
         "unique_calls": len(seen_call_ids),
         "results": matching_calls,
-    }
-    if deal_correlation:
-        response["deal_correlation"] = deal_correlation
-
-    return jsonify(response)
-
-
-def compute_deal_correlation(participant_emails, from_date, to_date):
-    """
-    For the given participant emails, find associated HubSpot deals
-    and compute win-rate correlation.
-    """
-    closed_won = 0
-    closed_lost = 0
-    deal_ids_seen = set()
-
-    for email in participant_emails:
-        # Find contact by email
-        contacts = search_contacts(email, "email")
-        if not contacts:
-            continue
-
-        contact_id = contacts[0].get("id")
-        if not contact_id:
-            continue
-
-        # Get associated deals
-        assoc_result = hubspot_request(
-            "GET", f"/crm/v4/objects/contacts/{contact_id}/associations/deals"
-        )
-        if not assoc_result or "results" not in assoc_result:
-            continue
-
-        for assoc in assoc_result["results"]:
-            deal_id = assoc.get("toObjectId")
-            if not deal_id or deal_id in deal_ids_seen:
-                continue
-            deal_ids_seen.add(deal_id)
-
-            # Get deal properties
-            deal_result = hubspot_request(
-                "GET",
-                f"/crm/v3/objects/deals/{deal_id}?properties=dealstage,dealname,amount,closedate",
-            )
-            if not deal_result:
-                continue
-
-            stage = deal_result.get("properties", {}).get("dealstage", "")
-            if stage == "closedwon":
-                closed_won += 1
-            elif stage == "closedlost":
-                closed_lost += 1
-
-    total_with_outcome = closed_won + closed_lost
-    if total_with_outcome == 0:
-        return None
-
-    # Get baseline: total deals in the same period
-    baseline = get_baseline_deal_stats(from_date, to_date)
-
-    correlation = {
-        "calls_with_match": len(deal_ids_seen),
-        "closed_won": closed_won,
-        "closed_lost": closed_lost,
-        "match_win_rate": f"{round(closed_won / total_with_outcome * 100)}%",
-    }
-
-    if baseline:
-        correlation["total_deals_in_period"] = baseline["total"]
-        correlation["baseline_win_rate"] = baseline["win_rate"]
-
-    return correlation
-
-
-def get_baseline_deal_stats(from_date, to_date):
-    """Get overall deal win rate for a date range as baseline comparison."""
-    filters = []
-    if from_date:
-        filters.append(
-            {
-                "propertyName": "closedate",
-                "operator": "GTE",
-                "value": datetime.fromisoformat(from_date).strftime("%s000"),
-            }
-        )
-    if to_date:
-        filters.append(
-            {
-                "propertyName": "closedate",
-                "operator": "LTE",
-                "value": datetime.fromisoformat(to_date + "T23:59:59").strftime("%s000"),
-            }
-        )
-
-    # Only count closed deals
-    filters.append(
-        {
-            "propertyName": "dealstage",
-            "operator": "IN",
-            "values": ["closedwon", "closedlost"],
-        }
-    )
-
-    payload = {
-        "filterGroups": [{"filters": filters}],
-        "properties": ["dealstage"],
-        "limit": 100,
-    }
-
-    result = hubspot_request("POST", "/crm/v3/objects/deals/search", payload)
-    if not result or "results" not in result:
-        return None
-
-    deals = result["results"]
-    total = len(deals)
-    won = sum(
-        1 for d in deals if d.get("properties", {}).get("dealstage") == "closedwon"
-    )
-
-    if total == 0:
-        return None
-
-    return {
-        "total": total,
-        "won": won,
-        "lost": total - won,
-        "win_rate": f"{round(won / total * 100)}%",
-    }
+    })
 
 
 @app.route("/gong/ingest", methods=["POST"])
