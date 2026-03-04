@@ -5,3 +5,4 @@ gunicorn
 openai
 python-dotenv
 pymongo[srv]
+mcp[cli]
