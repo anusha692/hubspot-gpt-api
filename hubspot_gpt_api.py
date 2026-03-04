@@ -757,6 +757,182 @@ def get_full_contact_profile(email: str):
 
 
 # ============================================================================
+# MCP SERVER (for Claude.ai integration)
+# ============================================================================
+
+import json as json_module
+
+MCP_TOOLS = {
+    "search_gong_calls": {
+        "description": "Search Gong calls by date range. Returns call IDs, titles, dates, and recording URLs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "from_date": {"type": "string", "description": "Start date (YYYY-MM-DD). Defaults to 7 days ago."},
+                "to_date": {"type": "string", "description": "End date (YYYY-MM-DD). Defaults to today."},
+                "limit": {"type": "integer", "description": "Max results. Defaults to 20."},
+            },
+        },
+    },
+    "get_call_transcript": {
+        "description": "Get the full transcript of a Gong call, broken down by speaker.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "call_id": {"type": "string", "description": "The Gong call ID"},
+            },
+            "required": ["call_id"],
+        },
+    },
+    "search_transcripts": {
+        "description": "Semantic search across all Gong transcripts from the last 3 months. Use this to find calls mentioning specific topics, stories, or patterns. Call titles follow the format 'Company (Contact) <> Clipbook (Rep)' - use company names to cross-reference with HubSpot deals.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Natural language search query (e.g. 'Derek story', 'pricing objection')"},
+                "from_date": {"type": "string", "description": "Optional start date filter (YYYY-MM-DD)"},
+                "to_date": {"type": "string", "description": "Optional end date filter (YYYY-MM-DD)"},
+                "limit": {"type": "integer", "description": "Max results. Defaults to 20."},
+            },
+            "required": ["query"],
+        },
+    },
+    "search_hubspot_contacts": {
+        "description": "Search HubSpot contacts by email or company name.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Email address or company name"},
+                "search_by": {"type": "string", "enum": ["email", "company"], "description": "Search field. Auto-detected if not provided."},
+            },
+            "required": ["query"],
+        },
+    },
+    "get_deal_pipelines": {
+        "description": "List all HubSpot deal pipelines and their stages. ALWAYS call this first to discover stage IDs before searching deals.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    "search_deals": {
+        "description": "Search HubSpot deals by stage ID, date range, or company name. Use get_deal_pipelines first to discover stage IDs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "stage": {"type": "string", "description": "Deal stage ID from get_deal_pipelines"},
+                "from_date": {"type": "string", "description": "Filter by close date (YYYY-MM-DD)"},
+                "to_date": {"type": "string", "description": "Filter by close date (YYYY-MM-DD)"},
+                "company": {"type": "string", "description": "Filter by deal/company name"},
+                "limit": {"type": "integer", "description": "Max results. Defaults to 100."},
+            },
+        },
+    },
+}
+
+
+def mcp_call_tool(name, arguments):
+    """Execute an MCP tool by calling the corresponding Flask endpoint internally."""
+    with app.test_client() as client:
+        if name == "search_gong_calls":
+            resp = client.post("/gong/calls/search", json=arguments)
+        elif name == "get_call_transcript":
+            resp = client.get(f"/gong/calls/{arguments['call_id']}/transcript")
+        elif name == "search_transcripts":
+            resp = client.post("/gong/search", json=arguments)
+        elif name == "search_hubspot_contacts":
+            resp = client.post("/hubspot/search", json=arguments)
+        elif name == "get_deal_pipelines":
+            resp = client.get("/hubspot/deals/pipelines")
+        elif name == "search_deals":
+            resp = client.post("/hubspot/deals/search", json=arguments)
+        else:
+            return {"error": f"Unknown tool: {name}"}
+        return resp.get_json()
+
+
+@app.route("/mcp", methods=["POST"])
+def handle_mcp():
+    """Handle MCP JSON-RPC requests for Claude.ai integration."""
+    body = request.json
+    method = body.get("method")
+    req_id = body.get("id")
+    params = body.get("params", {})
+
+    if method == "initialize":
+        return jsonify({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "sales-intelligence", "version": "1.0.0"},
+            },
+        })
+
+    if method == "notifications/initialized":
+        return jsonify({"jsonrpc": "2.0", "id": req_id, "result": {}})
+
+    if method == "tools/list":
+        tool_list = [
+            {"name": name, "description": t["description"], "inputSchema": t["inputSchema"]}
+            for name, t in MCP_TOOLS.items()
+        ]
+        return jsonify({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"tools": tool_list},
+        })
+
+    if method == "tools/call":
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {})
+
+        if tool_name not in MCP_TOOLS:
+            return jsonify({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
+            })
+
+        try:
+            result = mcp_call_tool(tool_name, arguments)
+            return jsonify({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": json_module.dumps(result, default=str)}],
+                },
+            })
+        except Exception as e:
+            return jsonify({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": json_module.dumps({"error": str(e)})}],
+                    "isError": True,
+                },
+            })
+
+    return jsonify({
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {"code": -32601, "message": f"Unknown method: {method}"},
+    })
+
+
+@app.route("/sse", methods=["GET"])
+def sse_endpoint():
+    """SSE endpoint for Claude.ai MCP connection."""
+    from flask import Response
+
+    def generate():
+        yield f"event: endpoint\ndata: /mcp\n\n"
+
+    return Response(generate(), mimetype="text/event-stream")
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
