@@ -10,7 +10,7 @@ For production:
     gunicorn hubspot_gpt_api:app --bind 0.0.0.0:$PORT
 """
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 import requests
 import os
@@ -938,7 +938,8 @@ def sse_endpoint():
 
     def generate():
         # Tell the client where to POST messages
-        yield f"event: endpoint\ndata: /messages?session_id={session_id}\n\n"
+        base_url = request.url_root.rstrip("/")
+        yield f"event: endpoint\ndata: {base_url}/messages?session_id={session_id}\n\n"
 
         # Keep connection alive, forwarding responses from the queue
         while True:
@@ -954,10 +955,11 @@ def sse_endpoint():
         # Cleanup
         mcp_sessions.pop(session_id, None)
 
-    response = Response(generate(), mimetype="text/event-stream")
+    response = Response(stream_with_context(generate()), mimetype="text/event-stream")
     response.headers["Cache-Control"] = "no-cache"
     response.headers["Connection"] = "keep-alive"
     response.headers["X-Accel-Buffering"] = "no"
+    response.headers["Transfer-Encoding"] = "chunked"
     return response
 
 
