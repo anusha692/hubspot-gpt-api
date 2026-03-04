@@ -10,10 +10,14 @@ For production:
     gunicorn hubspot_gpt_api:app --bind 0.0.0.0:$PORT
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import requests
 import os
+import uuid
+import json as json_module
+import queue
+import threading
 from datetime import datetime, timedelta
 import base64
 
@@ -760,8 +764,6 @@ def get_full_contact_profile(email: str):
 # MCP SERVER (for Claude.ai integration)
 # ============================================================================
 
-import json as json_module
-
 MCP_TOOLS = {
     "search_gong_calls": {
         "description": "Search Gong calls by date range. Returns call IDs, titles, dates, and recording URLs.",
@@ -851,16 +853,22 @@ def mcp_call_tool(name, arguments):
         return resp.get_json()
 
 
-@app.route("/mcp", methods=["POST"])
-def handle_mcp():
-    """Handle MCP JSON-RPC requests for Claude.ai integration."""
-    body = request.json
+# ============================================================================
+# MCP SSE TRANSPORT
+# ============================================================================
+
+# Active SSE sessions: session_id -> queue.Queue
+mcp_sessions = {}
+
+
+def process_mcp_request(body):
+    """Process a JSON-RPC MCP request and return the response dict."""
     method = body.get("method")
     req_id = body.get("id")
     params = body.get("params", {})
 
     if method == "initialize":
-        return jsonify({
+        return {
             "jsonrpc": "2.0",
             "id": req_id,
             "result": {
@@ -868,68 +876,105 @@ def handle_mcp():
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "sales-intelligence", "version": "1.0.0"},
             },
-        })
+        }
 
     if method == "notifications/initialized":
-        return jsonify({"jsonrpc": "2.0", "id": req_id, "result": {}})
+        return {"jsonrpc": "2.0", "id": req_id, "result": {}}
 
     if method == "tools/list":
         tool_list = [
             {"name": name, "description": t["description"], "inputSchema": t["inputSchema"]}
             for name, t in MCP_TOOLS.items()
         ]
-        return jsonify({
+        return {
             "jsonrpc": "2.0",
             "id": req_id,
             "result": {"tools": tool_list},
-        })
+        }
 
     if method == "tools/call":
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
 
         if tool_name not in MCP_TOOLS:
-            return jsonify({
+            return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
-            })
+            }
 
         try:
             result = mcp_call_tool(tool_name, arguments)
-            return jsonify({
+            return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
                     "content": [{"type": "text", "text": json_module.dumps(result, default=str)}],
                 },
-            })
+            }
         except Exception as e:
-            return jsonify({
+            return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
                     "content": [{"type": "text", "text": json_module.dumps({"error": str(e)})}],
                     "isError": True,
                 },
-            })
+            }
 
-    return jsonify({
+    return {
         "jsonrpc": "2.0",
         "id": req_id,
         "error": {"code": -32601, "message": f"Unknown method: {method}"},
-    })
+    }
 
 
 @app.route("/sse", methods=["GET"])
 def sse_endpoint():
-    """SSE endpoint for Claude.ai MCP connection."""
-    from flask import Response
+    """SSE endpoint for Claude.ai MCP connection. Keeps connection open."""
+    session_id = str(uuid.uuid4())
+    q = queue.Queue()
+    mcp_sessions[session_id] = q
 
     def generate():
-        yield f"event: endpoint\ndata: /mcp\n\n"
+        # Tell the client where to POST messages
+        yield f"event: endpoint\ndata: /messages?session_id={session_id}\n\n"
 
-    return Response(generate(), mimetype="text/event-stream")
+        # Keep connection alive, forwarding responses from the queue
+        while True:
+            try:
+                message = q.get(timeout=30)
+                if message is None:
+                    break
+                yield f"event: message\ndata: {json_module.dumps(message, default=str)}\n\n"
+            except queue.Empty:
+                # Send keepalive comment to prevent timeout
+                yield ": keepalive\n\n"
+
+        # Cleanup
+        mcp_sessions.pop(session_id, None)
+
+    response = Response(generate(), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Connection"] = "keep-alive"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
+
+
+@app.route("/messages", methods=["POST"])
+def mcp_messages():
+    """Receive MCP JSON-RPC messages and send responses via SSE stream."""
+    session_id = request.args.get("session_id")
+    if not session_id or session_id not in mcp_sessions:
+        return jsonify({"error": "Invalid or expired session"}), 400
+
+    body = request.json
+    response = process_mcp_request(body)
+
+    # Queue the response to be sent via the SSE stream
+    mcp_sessions[session_id].put(response)
+
+    return "", 202
 
 
 # ============================================================================

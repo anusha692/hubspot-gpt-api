@@ -2,6 +2,7 @@ flask
 flask-cors
 requests
 gunicorn
+gevent
 openai
 python-dotenv
 pymongo[srv]
