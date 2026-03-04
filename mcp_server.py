@@ -435,8 +435,13 @@ def search_deals(
 # MAIN
 # ============================================================================
 
+app = mcp.streamable_http_app()
+
 if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    app = mcp.streamable_http_app()
-    uvicorn.run(app, host="0.0.0.0", port=port, proxy_headers=True, forwarded_allow_ips="*")
+    import asyncio
+    from hypercorn.config import Config
+    from hypercorn.asyncio import serve
+
+    config = Config()
+    config.bind = [f"0.0.0.0:{os.environ.get('PORT', 8000)}"]
+    asyncio.run(serve(app, config))

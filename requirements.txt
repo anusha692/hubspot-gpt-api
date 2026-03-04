@@ -6,4 +6,4 @@ openai
 python-dotenv
 pymongo[srv]
 mcp[cli]
-uvicorn<0.32.0
+hypercorn
