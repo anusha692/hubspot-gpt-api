@@ -435,7 +435,28 @@ def search_deals(
 # MAIN
 # ============================================================================
 
-app = mcp.streamable_http_app()
+class ProxyHostFixMiddleware:
+    """Fix Host header validation when running behind a reverse proxy like Render."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            # Make server tuple match the Host header so Starlette's
+            # host validation doesn't reject the request with 421
+            for key, value in scope.get("headers", []):
+                if key == b"host":
+                    host_header = value.decode()
+                    host_parts = host_header.split(":")
+                    host = host_parts[0]
+                    port = int(host_parts[1]) if len(host_parts) > 1 else 443
+                    scope = dict(scope, server=(host, port))
+                    break
+        await self.app(scope, receive, send)
+
+
+_mcp_app = mcp.streamable_http_app()
+app = ProxyHostFixMiddleware(_mcp_app)
 
 if __name__ == "__main__":
     import asyncio
