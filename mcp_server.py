@@ -2,8 +2,8 @@
 Sales Intelligence MCP Server
 ==============================
 
-MCP server for Claude.ai that provides access to Gong call recordings,
-transcript semantic search, and HubSpot CRM data.
+MCP server for Claude.ai that provides access to Gong call recordings
+and transcript semantic search.
 
 Uses the official MCP Python SDK with streamable-http transport.
 """
@@ -20,9 +20,6 @@ from mcp.server.fastmcp import FastMCP
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
-
-HUBSPOT_ACCESS_TOKEN = os.environ.get("HUBSPOT_ACCESS_TOKEN")
-HUBSPOT_BASE_URL = "https://api.hubapi.com"
 
 GONG_BASE_URL = os.environ.get("GONG_BASE_URL", "https://us-22394.api.gong.io")
 GONG_API_KEY = os.environ.get("GONG_API_KEY")
@@ -60,23 +57,6 @@ def gong_request(method, endpoint, json_data=None, params=None):
             return None
     except Exception:
         return None
-
-
-def hubspot_request(method, endpoint, json_data=None):
-    """Make a request to HubSpot API."""
-    headers = {
-        "Authorization": f"Bearer {HUBSPOT_ACCESS_TOKEN}",
-        "Content-Type": "application/json",
-    }
-
-    url = f"{HUBSPOT_BASE_URL}{endpoint}"
-
-    if method == "GET":
-        response = http_requests.get(url, headers=headers)
-    elif method == "POST":
-        response = http_requests.post(url, headers=headers, json=json_data)
-
-    return response.json() if response.status_code == 200 else None
 
 
 def get_mongo_collection():
@@ -189,9 +169,7 @@ def search_transcripts(
     limit: int = 20,
 ) -> dict:
     """Semantic search across all Gong transcripts from the last 3 months.
-    Use this to find calls mentioning specific topics, stories, or patterns.
-    Call titles follow the format 'Company (Contact) <> Clipbook (Rep)' —
-    use company names to cross-reference with HubSpot deals."""
+    Use this to find calls mentioning specific topics, stories, or patterns."""
     if not query.strip():
         return {"error": "Please provide a search query"}
 
@@ -264,170 +242,6 @@ def search_transcripts(
         "matching_chunks": len(matching_calls),
         "unique_calls": len(seen_call_ids),
         "results": matching_calls,
-    }
-
-
-@mcp.tool()
-def search_hubspot_contacts(
-    query: str,
-    search_by: str = "",
-) -> dict:
-    """Search HubSpot contacts by email or company name."""
-    if not query.strip():
-        return {"error": "Please provide a search query"}
-
-    if not search_by:
-        search_by = "email" if "@" in query else "company"
-
-    properties = [
-        "email", "firstname", "lastname", "company", "jobtitle",
-        "sector", "industry",
-        "latest_call_date", "latest_call_duration", "latest_call_gong_url",
-        "latest_call_summary", "gong_total_calls", "gong_buying_signals",
-        "gong_competitor_mentioned", "gong_topics_discussed", "gong_next_steps",
-        "pain_points_mentioned", "gong_last_sentiment",
-    ]
-
-    filters = [{"propertyName": search_by, "operator": "CONTAINS_TOKEN", "value": query}]
-
-    payload = {
-        "filterGroups": [{"filters": filters}],
-        "properties": properties,
-        "limit": 10,
-    }
-
-    result = hubspot_request("POST", "/crm/v3/objects/contacts/search", payload)
-
-    if not result or "results" not in result:
-        return {"message": f"No contacts found matching '{query}'", "results": []}
-
-    contacts = []
-    for contact in result["results"]:
-        props = contact.get("properties", {})
-        contacts.append({
-            "name": f"{props.get('firstname', '')} {props.get('lastname', '')}".strip() or "Unknown",
-            "email": props.get("email", ""),
-            "company": props.get("company", "Unknown"),
-            "title": props.get("jobtitle", ""),
-            "total_calls": props.get("gong_total_calls", "0"),
-            "last_call_date": props.get("latest_call_date", ""),
-            "call_summary": props.get("latest_call_summary", ""),
-            "buying_signals": props.get("gong_buying_signals", ""),
-            "competitors_mentioned": props.get("gong_competitor_mentioned", ""),
-            "pain_points": props.get("pain_points_mentioned", ""),
-        })
-
-    return {"message": f"Found {len(contacts)} contact(s)", "results": contacts}
-
-
-@mcp.tool()
-def get_deal_pipelines() -> dict:
-    """List all HubSpot deal pipelines and their stages.
-    ALWAYS call this first to discover stage IDs before searching deals by stage."""
-    headers = {
-        "Authorization": f"Bearer {HUBSPOT_ACCESS_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    response = http_requests.get(f"{HUBSPOT_BASE_URL}/crm/v3/pipelines/deals", headers=headers)
-
-    if response.status_code != 200:
-        return {"error": "Could not fetch pipelines"}
-
-    result = response.json()
-    if "results" not in result:
-        return {"error": "Unexpected response format"}
-
-    pipelines = []
-    for pipeline in result["results"]:
-        stages = []
-        for stage in pipeline.get("stages", []):
-            stages.append({
-                "stage_id": stage.get("id"),
-                "label": stage.get("label"),
-                "display_order": stage.get("displayOrder"),
-            })
-        pipelines.append({
-            "pipeline_id": pipeline.get("id"),
-            "label": pipeline.get("label"),
-            "stages": stages,
-        })
-
-    return {"pipelines": pipelines}
-
-
-@mcp.tool()
-def search_deals(
-    stage: str = "",
-    from_date: str = "",
-    to_date: str = "",
-    company: str = "",
-    limit: int = 100,
-) -> dict:
-    """Search HubSpot deals by stage ID, date range, or company name.
-    Use get_deal_pipelines first to discover the correct stage IDs."""
-    filters = []
-
-    if stage:
-        filters.append({
-            "propertyName": "dealstage",
-            "operator": "EQ",
-            "value": stage,
-        })
-
-    if from_date:
-        ts = int(datetime.fromisoformat(from_date).timestamp() * 1000)
-        filters.append({
-            "propertyName": "closedate",
-            "operator": "GTE",
-            "value": str(ts),
-        })
-
-    if to_date:
-        ts = int(datetime.fromisoformat(to_date + "T23:59:59").timestamp() * 1000)
-        filters.append({
-            "propertyName": "closedate",
-            "operator": "LTE",
-            "value": str(ts),
-        })
-
-    if company:
-        filters.append({
-            "propertyName": "dealname",
-            "operator": "CONTAINS_TOKEN",
-            "value": company,
-        })
-
-    payload = {
-        "filterGroups": [{"filters": filters}] if filters else [],
-        "properties": [
-            "dealname", "dealstage", "amount", "closedate",
-            "pipeline", "hs_lastmodifieddate",
-        ],
-        "sorts": [{"propertyName": "closedate", "direction": "DESCENDING"}],
-        "limit": limit,
-    }
-
-    result = hubspot_request("POST", "/crm/v3/objects/deals/search", payload)
-
-    if not result or "results" not in result:
-        return {"message": "No deals found", "results": [], "total": 0}
-
-    deals = []
-    for deal in result["results"]:
-        props = deal.get("properties", {})
-        deals.append({
-            "deal_id": deal.get("id"),
-            "name": props.get("dealname", ""),
-            "stage": props.get("dealstage", ""),
-            "amount": props.get("amount", ""),
-            "close_date": props.get("closedate", ""),
-            "pipeline": props.get("pipeline", ""),
-        })
-
-    return {
-        "message": f"Found {len(deals)} deals",
-        "total": result.get("total", len(deals)),
-        "results": deals,
     }
 
 
