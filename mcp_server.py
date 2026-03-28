@@ -90,7 +90,8 @@ def search_gong_calls(
     limit: int = 20,
 ) -> dict:
     """Search Gong calls by date range. Returns call IDs, titles, participants, and recording URLs.
-    Defaults to last 7 days if no dates provided."""
+    Defaults to last 7 days if no dates provided.
+    IMPORTANT: Always include the call url from results as clickable links when presenting findings to the user."""
     if not to_date:
         to_date = datetime.now().strftime("%Y-%m-%d")
     if not from_date:
@@ -126,7 +127,8 @@ def search_gong_calls(
 
 @mcp.tool()
 def get_call_transcript(call_id: str) -> dict:
-    """Get the full transcript of a Gong call, broken down by speaker segments."""
+    """Get the full transcript of a Gong call, broken down by speaker segments.
+    When summarizing a transcript, always link back to the Gong recording URL."""
     payload = {
         "filter": {
             "fromDateTime": (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%dT00:00:00Z"),
@@ -169,7 +171,8 @@ def search_transcripts(
     limit: int = 20,
 ) -> dict:
     """Semantic search across all Gong transcripts from the last 3 months.
-    Use this to find calls mentioning specific topics, stories, or patterns."""
+    Use this to find calls mentioning specific topics, stories, or patterns.
+    IMPORTANT: Always include the call_url from results as clickable evidence links when presenting findings to the user. Every claim must be backed by a Gong recording link."""
     if not query.strip():
         return {"error": "Please provide a search query"}
 

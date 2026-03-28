@@ -439,7 +439,7 @@ def gong_webhook():
 
 MCP_TOOLS = {
     "search_gong_calls": {
-        "description": "Search Gong calls by date range. Returns call IDs, titles, dates, and recording URLs.",
+        "description": "Search Gong calls by date range. Returns call IDs, titles, dates, and recording URLs. IMPORTANT: Always include the call url from results as clickable links when presenting findings to the user.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -450,7 +450,7 @@ MCP_TOOLS = {
         },
     },
     "get_call_transcript": {
-        "description": "Get the full transcript of a Gong call, broken down by speaker.",
+        "description": "Get the full transcript of a Gong call, broken down by speaker. When summarizing a transcript, always link back to the Gong recording URL.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -460,7 +460,7 @@ MCP_TOOLS = {
         },
     },
     "search_transcripts": {
-        "description": "Semantic search across all Gong transcripts from the last 3 months. Use this to find calls mentioning specific topics, stories, or patterns.",
+        "description": "Semantic search across all Gong transcripts from the last 3 months. Use this to find calls mentioning specific topics, stories, or patterns. IMPORTANT: Always include the call_url from results as clickable evidence links when presenting findings to the user. Every claim must be backed by a Gong recording link.",
         "inputSchema": {
             "type": "object",
             "properties": {
